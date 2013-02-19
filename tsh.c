@@ -196,7 +196,7 @@ void eval(char *cmdline)
         return;
  
     if (!builtin_cmd(my_argv)){
-        // Be aware iam not reaping my children have to implent that
+        // Blocking signals when i call fork and execve
         Sigemptyset(&mask);
         Sigaddset(&mask, SIGCHLD); /* Block SIGCHLG */
         Sigaddset(&mask, SIGINT);
@@ -351,13 +351,8 @@ int builtin_cmd(char **argv)
         listjobs(jobs);
         return 1;    
     }
-    
-    if (!strcmp(argv[0], "bg")){
-        do_bgfg(argv);
-        return 1;
-    }
 
-    if (!strcmp(argv[0], "fg")){
+    if (!strcmp(argv[0], "bg") || !strcmp(argv[0], "fg")){
         do_bgfg(argv);
         return 1;
     }
@@ -464,14 +459,12 @@ pid_t get_my_pid(char **argv)
     
     if (pid == 0){
         if ((job = getjobjid(jobs, job_id)) == NULL){
-            printf("Invalid job id.\n");
             return 0;
         }
         pid = job->pid;
         return pid;
     } else {
         if ((job = getjobpid(jobs, pid)) == NULL){
-            printf("Invalid pid.\n");
             return 0;
         }
         pid = job->pid;
@@ -499,12 +492,12 @@ int change_job_state(pid_t pid, int old_state, int new_state)
 
     job = getjobpid(jobs, pid);
     if(new_state == FG){
-        job->state = FG;
+        job->state = new_state;
         kill(-(job->pid), SIGCONT);
         waitfg(job->pid);
     } 
     else if(new_state == BG){
-        job->state = BG;
+        job->state = new_state;
         kill(-(job->pid), SIGCONT);
         printf("[%d] (%d) %s\n", job->jid, job->pid, job->cmdline);
     } else
@@ -518,18 +511,7 @@ int change_job_state(pid_t pid, int old_state, int new_state)
  * waitfg - Block until process pid is no longer the foreground process
  */
 void waitfg(pid_t pid)
-{  
-    /*struct job_t *job = getjobpid(jobs, pid);
-    int status;   
-    while(waitpid(job->pid, &status, WNOHANG) == 0){
-        if(job->state == ST)
-            return;
-    }
-    
-    if (deletejob(jobs, job->pid) < 1)
-        unix_error("Delete a job in foreground failed");
-    */
-
+{   // Just a busy loop until pid == 0
     while (pid == fgpid(jobs))
         sleep(0);
 }
@@ -579,9 +561,6 @@ void sigchld_handler(int sig)
         }
            
     }
-    
-    //if (errno != ECHILD)
-       // unix_error("waitpid error in sigchld handler");
     
     return;    
 }
