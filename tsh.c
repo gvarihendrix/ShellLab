@@ -210,17 +210,16 @@ void eval(char *cmdline)
         } else if(pid > 0){
 
             if (!back_ground) {  
-               addjob(jobs, pid, FG, cmdline); 
+                addjob(jobs, pid, FG, cmdline);
+                Sigprocmask(SIG_UNBLOCK, &mask, NULL);
+                waitfg(pid);
             } else {
                     // I need to put the job in background
                 addjob(jobs, pid, BG, cmdline);
+                Sigprocmask(SIG_UNBLOCK, &mask, NULL);
                 printf("[%d] (%d) %s.\n", pid2jid(pid), pid, cmdline);
-            }
-
-            Sigprocmask(SIG_UNBLOCK, &mask, NULL);
-
-            if (!back_ground)
-                waitfg(pid);
+            } 
+            
         }    
    } 
    
@@ -391,8 +390,7 @@ void do_bgfg(char **argv)
 void set_job_to_fg(char **argv)
 {
     pid_t pid;
-    if (argv[1] == NULL){
-        // Need to get the last bg process to begin
+    if (argv[1] == NULL){ 
         printf("Command requries PID or %%jobid\n");
         return;
     }
@@ -422,7 +420,6 @@ void set_job_to_bg(char **argv)
 {
     pid_t pid;
     if (argv[1] == NULL){
-        // Need to get the fg process to to go in bg
         printf("Command requries PID or %%jobid\n");
         return;
     } else if ((pid = get_my_pid(argv)) == 0){
@@ -501,7 +498,18 @@ int change_job_state(pid_t pid, int old_state, int new_state)
         return 0;
 
     job = getjobpid(jobs, pid);
-    job->state = new_state;
+    if(new_state == FG){
+        job->state = FG;
+        kill(-(job->pid), SIGCONT);
+        waitfg(job->pid);
+    } 
+    else if(new_state == BG){
+        job->state = BG;
+        kill(-(job->pid), SIGCONT);
+        printf("[%d] (%d) %s\n", job->jid, job->pid, job->cmdline);
+    } else
+        return 0; 
+   
     return 1;
 }
 
@@ -511,7 +519,7 @@ int change_job_state(pid_t pid, int old_state, int new_state)
  */
 void waitfg(pid_t pid)
 {  
-    struct job_t *job = getjobpid(jobs, pid);
+    /*struct job_t *job = getjobpid(jobs, pid);
     int status;   
     while(waitpid(job->pid, &status, WNOHANG) == 0){
         if(job->state == ST)
@@ -520,6 +528,10 @@ void waitfg(pid_t pid)
     
     if (deletejob(jobs, job->pid) < 1)
         unix_error("Delete a job in foreground failed");
+    */
+
+    while (pid == fgpid(jobs))
+        sleep(0);
 }
 
 
@@ -546,7 +558,7 @@ void sigchld_handler(int sig)
         printf("Job [%d] %d terminted by signal %d.\n", pid2jid(fg_job), fg_job, sig);
     }
 
-
+    
     while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0){
       
         if (verbose){
@@ -569,7 +581,7 @@ void sigchld_handler(int sig)
     }
     
     //if (errno != ECHILD)
-      // unix_error("waitpid error in sigchld handler");
+       // unix_error("waitpid error in sigchld handler");
     
     return;    
 }
@@ -586,7 +598,7 @@ void sigint_handler(int sig)
         printf("In handler for sigint %d \n", pid);
     
     if (pid != 0)
-        kill(-pid, sig);
+        kill(-pid, SIGINT);
 
     return;
 }
@@ -603,7 +615,7 @@ void sigtstp_handler(int sig)
         printf("In handler for sigstp %d \n", pid);
 
     if (pid != 0)
-        kill(-pid, sig);
+        kill(-pid, SIGTSTP);
     return;
 }
 
