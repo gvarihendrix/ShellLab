@@ -99,6 +99,10 @@ void Execve(char **argv, char **env);
 void Sigemptyset(sigset_t *set);
 void Sigprocmask(int change, const sigset_t *set, sigset_t *oset);
 void Sigaddset(sigset_t *set, int signo);
+void set_job_to_fg(char **argv);
+void set_job_to_bg(char **argv);
+int change_job_state(pid_t pid, int old_state, int new_state);
+pid_t get_my_pid(char **argv);
 /*
  * main - The shell's main routine 
  */
@@ -195,26 +199,30 @@ void eval(char *cmdline)
         // Be aware iam not reaping my children have to implent that
         Sigemptyset(&mask);
         Sigaddset(&mask, SIGCHLD); /* Block SIGCHLG */
+        Sigaddset(&mask, SIGINT);
+        Sigaddset(&mask, SIGTSTP);
         Sigprocmask(SIG_BLOCK, &mask, NULL); 
 
-        if ((pid = Fork()) == 0) { 
-            //addjob(&jobs[pid], pid, FG, cmdline);  
+        if ((pid = Fork()) == 0 && (setpgid(0, 0) != -1)) { 
+            
             Sigprocmask(SIG_UNBLOCK, &mask, NULL); /*Unblock SIGCHLD */
             Execve(my_argv, environ);
-        } 
+        } else if(pid > 0){
 
+            if (!back_ground) {  
+               addjob(jobs, pid, FG, cmdline); 
+            } else {
+                    // I need to put the job in background
+                addjob(jobs, pid, BG, cmdline);
+                printf("[%d] (%d) %s.\n", pid2jid(pid), pid, cmdline);
+            }
 
-        if (!back_ground) {  
-            addjob(jobs, pid, FG, cmdline);
-            waitfg(pid);
-            Sigprocmask(SIG_UNBLOCK, &mask, NULL);   
-        } else {
-            // I need to put the job in background
-            addjob(jobs, pid, BG, cmdline);
-            printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
+            Sigprocmask(SIG_UNBLOCK, &mask, NULL);
 
-        }
-    } 
+            if (!back_ground)
+                waitfg(pid);
+        }    
+   } 
    
    return;
 }
@@ -255,7 +263,7 @@ void Sigaddset(sigset_t *set, int signo)
 void Execve(char **argv, char **env) 
 {
     if(execve(argv[0], argv, env) < 0) {
-        printf("%s : Command not found.\n%s", argv[0], prompt);
+        printf("%s : Command not found.\n", argv[0]);
         exit(0);
     }
 }
@@ -344,6 +352,17 @@ int builtin_cmd(char **argv)
         listjobs(jobs);
         return 1;    
     }
+    
+    if (!strcmp(argv[0], "bg")){
+        do_bgfg(argv);
+        return 1;
+    }
+
+    if (!strcmp(argv[0], "fg")){
+        do_bgfg(argv);
+        return 1;
+    }
+
     if (!strcmp(argv[0], "&")) /* not a singelton */
         return 1;
 
@@ -355,24 +374,152 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+    if (!strcmp(argv[0], "fg")){
+        set_job_to_fg(argv);
+        return;
+    }
     
+    if (!strcmp(argv[0], "bg")){
+        set_job_to_bg(argv);
+        return;
+    }
+}
+
+/*
+ * Setting a job into the fg process
+ */
+void set_job_to_fg(char **argv)
+{
+    pid_t pid;
+    if (argv[1] == NULL){
+        // Need to get the last bg process to begin
+        printf("Command requries PID or %%jobid\n");
+        return;
+    }
+
+
+    if((pid = get_my_pid(argv)) == 0){
+        printf("%d is not valid pid.\n", pid);
+        return;
+    }
+
+    if ((change_job_state(pid, ST | BG, FG)) < 1)
+        unix_error("Fg did not work\n");
+
+
+    if (verbose){
+        printf("Setting process %d into foreground.\n", pid);
+    }
+
+
+    return; 
+}
+
+/*
+ * Setting a job into the bg process
+ */
+void set_job_to_bg(char **argv)
+{
+    pid_t pid;
+    if (argv[1] == NULL){
+        // Need to get the fg process to to go in bg
+        printf("Command requries PID or %%jobid\n");
+        return;
+    } else if ((pid = get_my_pid(argv)) == 0){
+        printf("%d is not valid pid.\n", pid);
+        return;
+    }
+
+    if ((change_job_state(pid, ST | BG, FG)) < 1)
+        unix_error("Bg did not work\n");
+
+     if (verbose){
+        printf("Setting process %d into background.\n", pid);
+    }
     return;
 }
+
+/*
+ * Get my pid is a custom funciton to 
+ * help with the fg and bg functions, you are supposed 
+ * to be able to put a process either by giving it the pid or jid
+ */
+pid_t get_my_pid(char **argv)
+{   
+    int job_id = 0;
+    pid_t pid = 0;
+    int i;
+    char *found;
+    struct job_t* job;
+    if (verbose){
+        printf("In BG.\n");
+    }
+    
+    for(i = 1; argv[i] != NULL; i++){
+        if((found = strchr(argv[i], '%')) != NULL) {
+            job_id = atoi(++found); 
+            break;
+        } else {
+            pid = atoi(argv[i]);
+            break;
+        }
+    }
+    
+    if (pid == 0){
+        if ((job = getjobjid(jobs, job_id)) == NULL){
+            printf("Invalid job id.\n");
+            return 0;
+        }
+        pid = job->pid;
+        return pid;
+    } else {
+        if ((job = getjobpid(jobs, pid)) == NULL){
+            printf("Invalid pid.\n");
+            return 0;
+        }
+        pid = job->pid;
+        return pid;
+    }
+
+    return 0;
+   
+}   
+
+
+/*
+ * Change job state, if you want to put a specific job into background,
+ * foreground or have it stopped
+ */
+int change_job_state(pid_t pid, int old_state, int new_state)
+{
+    struct job_t *job;
+
+    if (verbose)
+        printf("Changing job pid %d state %d to %d.\n",pid, old_state, new_state);
+
+    if(pid < 1)
+        return 0;
+
+    job = getjobpid(jobs, pid);
+    job->state = new_state;
+    return 1;
+}
+
 
 /* 
  * waitfg - Block until process pid is no longer the foreground process
  */
 void waitfg(pid_t pid)
-{
-    struct job_t* fg_job = getjobpid(jobs, pid);
-    int status; 
-    while(waitpid(fg_job->pid, &status, WNOHANG) == 0){
-        if (fg_job->state == ST)
+{  
+    struct job_t *job = getjobpid(jobs, pid);
+    int status;   
+    while(waitpid(job->pid, &status, WNOHANG) == 0){
+        if(job->state == ST)
             return;
     }
-
-     
-    deletejob(jobs, fg_job->pid); 
+    
+    if (deletejob(jobs, job->pid) < 1)
+        unix_error("Delete a job in foreground failed");
 }
 
 
@@ -391,13 +538,40 @@ void waitfg(pid_t pid)
 void sigchld_handler(int sig) 
 {
     pid_t pid;
-    while ((pid = waitpid(-1, NULL, 0)) > 0){
-        //printf("Iam deleting child %d.\n", pid);
-    }
-    if (errno != ECHILD)
-       unix_error("waitpid error in sigchld handler");
+    pid_t fg_job = fgpid(jobs);
+    int status;
     
-    deletejob(jobs, pid);
+    if (verbose) {
+        printf("In sigchld %d.\n", fgpid(jobs));
+        printf("Job [%d] %d terminted by signal %d.\n", pid2jid(fg_job), fg_job, sig);
+    }
+
+
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0){
+      
+        if (verbose){
+            printf("Status on sigchld : %d\n", status);
+            printf("Wifstopped : %d\n", WIFSTOPPED(status));
+        }
+
+        if (WIFSTOPPED (status)){
+             getjobpid(jobs, pid)->state = ST;
+             printf("Job [%d] (%d) stopped by signal %d.\n", pid2jid(pid), pid, WSTOPSIG(status));
+        } else if (WIFSIGNALED(status)){
+            printf("Job [%d] (%d) terminted by signal %d.\n", pid2jid(pid), pid, WTERMSIG(status));
+            if ((deletejob(jobs, pid)) < 1)
+                unix_error("Deleting a process in sigchld failed");
+        } else {
+             if ((deletejob(jobs, pid)) < 1)
+                unix_error("Deleting a process in sigchld failed");
+        }
+           
+    }
+    
+    //if (errno != ECHILD)
+      // unix_error("waitpid error in sigchld handler");
+    
+    return;    
 }
 
 /* 
@@ -407,8 +581,14 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 { 
-    printf("\n%s", prompt);
-    fflush(stdout); 
+    pid_t pid = fgpid(jobs);
+    if (verbose)
+        printf("In handler for sigint %d \n", pid);
+    
+    if (pid != 0)
+        kill(-pid, sig);
+
+    return;
 }
 
 /*
@@ -419,12 +599,11 @@ void sigint_handler(int sig)
 void sigtstp_handler(int sig) 
 {
     pid_t pid = fgpid(jobs);
-    if (pid == 0)
-        return;
+    if (verbose)
+        printf("In handler for sigstp %d \n", pid);
 
-    kill(pid, SIGTSTP);
-    
-    
+    if (pid != 0)
+        kill(-pid, sig);
     return;
 }
 
